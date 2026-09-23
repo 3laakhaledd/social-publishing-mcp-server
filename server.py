@@ -2,6 +2,7 @@
 """
 Social Publishing MCP Server
 Publish organic content to Facebook, Instagram & TikTok.
+Read Facebook & Instagram conversations/inbox.
 Connects to ClickUp Brain via MCP Connect.
 """
 
@@ -182,6 +183,102 @@ async def fb_schedule_post(message: str, scheduled_publish_time: int, photo_url:
     return json.dumps({"status": "scheduled", "post_id": result.get("id"), "scheduled_for": scheduled_publish_time}, indent=2)
 
 
+# == FACEBOOK CONVERSATIONS / INBOX ==
+
+@mcp.tool()
+async def fb_list_conversations(limit: int = 25, after: str = "") -> str:
+    """
+    List recent Facebook Page conversations (Messenger inbox).
+    Returns participant names, message count, and last update time.
+
+    Args:
+        limit: Number of conversations to return (max 100, default 25)
+        after: Pagination cursor from a previous response to get the next page
+    """
+    if not META_PAGE_ID:
+        return json.dumps({"error": "META_PAGE_ID not configured"})
+    params = {
+        "fields": "participants,updated_time,message_count,id",
+        "limit": min(limit, 100),
+    }
+    if after:
+        params["after"] = after
+    result = await _meta_get(f"{META_PAGE_ID}/conversations", params=params)
+    conversations = result.get("data", [])
+    next_cursor = result.get("paging", {}).get("cursors", {}).get("after", "")
+    has_more = bool(result.get("paging", {}).get("next"))
+    output = []
+    for conv in conversations:
+        participants = [
+            {"name": p.get("name", ""), "id": p.get("id", "")}
+            for p in conv.get("participants", {}).get("data", [])
+        ]
+        output.append({
+            "conversation_id": conv.get("id"),
+            "participants": participants,
+            "message_count": conv.get("message_count"),
+            "updated_time": conv.get("updated_time"),
+        })
+    return json.dumps({
+        "conversations": output,
+        "count": len(output),
+        "has_more": has_more,
+        "next_cursor": next_cursor if has_more else None,
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def fb_get_conversation_messages(conversation_id: str, limit: int = 10, after: str = "") -> str:
+    """
+    Get messages from a specific Facebook Page conversation.
+
+    Args:
+        conversation_id: The conversation ID from fb_list_conversations
+        limit: Number of messages to return (max 100, default 10)
+        after: Pagination cursor for next page
+    """
+    params = {
+        "fields": "message,from,created_time,attachments",
+        "limit": min(limit, 100),
+    }
+    if after:
+        params["after"] = after
+    result = await _meta_get(f"{conversation_id}/messages", params=params)
+    messages = result.get("data", [])
+    next_cursor = result.get("paging", {}).get("cursors", {}).get("after", "")
+    has_more = bool(result.get("paging", {}).get("next"))
+    output = []
+    for msg in messages:
+        output.append({
+            "id": msg.get("id"),
+            "from": msg.get("from", {}),
+            "message": msg.get("message", ""),
+            "created_time": msg.get("created_time"),
+        })
+    return json.dumps({
+        "messages": output,
+        "count": len(output),
+        "has_more": has_more,
+        "next_cursor": next_cursor if has_more else None,
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def fb_get_participant_profile(user_id: str) -> str:
+    """
+    Get a Facebook user profile from a Page conversation (name, profile pic).
+    Only works for users who have messaged the Page.
+
+    Args:
+        user_id: The participant user ID from fb_list_conversations or fb_get_conversation_messages
+    """
+    params = {
+        "fields": "name,first_name,last_name,profile_pic",
+    }
+    result = await _meta_get(user_id, params=params)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
 # == INSTAGRAM (Content Publishing API) ==
 
 @mcp.tool()
@@ -289,6 +386,86 @@ async def ig_publish_story(image_url: str = "", video_url: str = "") -> str:
             await asyncio.sleep(5)
     result = await _meta_post(f"{META_IG_USER_ID}/media_publish", payload={"creation_id": cid})
     return json.dumps({"status": "published", "ig_media_id": result.get("id")}, indent=2)
+
+
+# == INSTAGRAM CONVERSATIONS / INBOX ==
+
+@mcp.tool()
+async def ig_list_conversations(limit: int = 25, after: str = "") -> str:
+    """
+    List recent Instagram Direct conversations.
+    Returns participant usernames and last update time.
+
+    Args:
+        limit: Number of conversations to return (max 100, default 25)
+        after: Pagination cursor from a previous response to get the next page
+    """
+    if not META_IG_USER_ID:
+        return json.dumps({"error": "META_IG_USER_ID not configured"})
+    params = {
+        "fields": "participants,updated_time,id",
+        "platform": "instagram",
+        "limit": min(limit, 100),
+    }
+    if after:
+        params["after"] = after
+    result = await _meta_get(f"{META_IG_USER_ID}/conversations", params=params)
+    conversations = result.get("data", [])
+    next_cursor = result.get("paging", {}).get("cursors", {}).get("after", "")
+    has_more = bool(result.get("paging", {}).get("next"))
+    output = []
+    for conv in conversations:
+        participants = [
+            {"name": p.get("name", ""), "username": p.get("username", ""), "id": p.get("id", "")}
+            for p in conv.get("participants", {}).get("data", [])
+        ]
+        output.append({
+            "conversation_id": conv.get("id"),
+            "participants": participants,
+            "updated_time": conv.get("updated_time"),
+        })
+    return json.dumps({
+        "conversations": output,
+        "count": len(output),
+        "has_more": has_more,
+        "next_cursor": next_cursor if has_more else None,
+    }, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ig_get_conversation_messages(conversation_id: str, limit: int = 10, after: str = "") -> str:
+    """
+    Get messages from a specific Instagram Direct conversation.
+
+    Args:
+        conversation_id: The conversation ID from ig_list_conversations
+        limit: Number of messages to return (max 100, default 10)
+        after: Pagination cursor for next page
+    """
+    params = {
+        "fields": "message,from,created_time",
+        "limit": min(limit, 100),
+    }
+    if after:
+        params["after"] = after
+    result = await _meta_get(f"{conversation_id}/messages", params=params)
+    messages = result.get("data", [])
+    next_cursor = result.get("paging", {}).get("cursors", {}).get("after", "")
+    has_more = bool(result.get("paging", {}).get("next"))
+    output = []
+    for msg in messages:
+        output.append({
+            "id": msg.get("id"),
+            "from": msg.get("from", {}),
+            "message": msg.get("message", ""),
+            "created_time": msg.get("created_time"),
+        })
+    return json.dumps({
+        "messages": output,
+        "count": len(output),
+        "has_more": has_more,
+        "next_cursor": next_cursor if has_more else None,
+    }, indent=2, ensure_ascii=False)
 
 
 # == TIKTOK (Content Posting API) ==
@@ -424,8 +601,9 @@ async def health(request: Request):
         "status": "ok",
         "transport": "sse",
         "sse_endpoint": "/sse",
-        "tools_count": 15,
+        "tools_count": 20,
         "platforms": ["facebook", "instagram", "tiktok"],
+        "capabilities": ["publishing", "conversations"],
     })
 
 
